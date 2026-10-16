@@ -24,6 +24,7 @@ final class WP_Image_Optimize {
 		add_filter( 'media_row_actions', array( $this, 'media_action' ), 10, 2 );
 		add_action( 'admin_post_wpio_optimize', array( $this, 'handle_manual_optimization' ) );
 		add_action( 'admin_notices', array( $this, 'admin_notice' ) );
+		add_action( 'wp_ajax_wpio_bulk_optimize', array( $this, 'handle_bulk_optimization' ) );
 	}
 
 	public function admin_menu() {
@@ -36,7 +37,12 @@ final class WP_Image_Optimize {
 		if ( false === strpos( $hook, 'wp-image-optimize' ) ) {
 			return;
 		}
-		wp_enqueue_style( 'wpio-admin', plugin_dir_url( __FILE__ ) . 'assets/admin.css', array(), '1.2.0' );
+		wp_enqueue_style( 'wpio-admin', plugin_dir_url( __FILE__ ) . 'assets/admin.css', array(), '1.3.0' );
+		wp_enqueue_script( 'wpio-admin', plugin_dir_url( __FILE__ ) . 'assets/admin.js', array(), '1.3.0', true );
+		wp_localize_script( 'wpio-admin', 'wpioBulk', array(
+			'url'   => admin_url( 'admin-ajax.php' ),
+			'nonce' => wp_create_nonce( 'wpio_bulk_optimize' ),
+		) );
 	}
 
 	public function register_settings() {
@@ -59,9 +65,10 @@ final class WP_Image_Optimize {
 		<div class="wrap wpio-wrap">
 			<section class="wpio-hero">
 				<div><span class="wpio-kicker">LOCAL IMAGE OPTIMIZATION</span><h1>WP Image Optimize</h1><p>Your images stay on your server. No API key or third-party account needed.</p></div>
-				<div class="wpio-hero-actions"><a class="button button-primary" href="<?php echo esc_url( admin_url( 'upload.php' ) ); ?>">Optimize an image <span class="dashicons dashicons-arrow-right-alt"></span></a><a class="wpio-text-link" href="<?php echo esc_url( admin_url( 'admin.php?page=wp-image-optimize-settings' ) ); ?>">Open settings</a></div>
+				<div class="wpio-hero-actions"><button type="button" class="button button-primary wpio-bulk-start">Optimize Media Library <span class="dashicons dashicons-arrow-right-alt"></span></button><a class="wpio-text-link" href="<?php echo esc_url( admin_url( 'admin.php?page=wp-image-optimize-settings' ) ); ?>">Open settings</a></div>
 			</section>
 
+			<div class="wpio-bulk-progress" hidden><div class="wpio-progress-copy"><strong>Optimizing your Media Library</strong><span>Starting…</span></div><div class="wpio-progress-track"><i></i></div><button type="button" class="button-link wpio-bulk-cancel">Stop</button></div>
 			<section class="wpio-grid" aria-label="Optimization statistics">
 				<article class="wpio-card wpio-card-featured"><span class="dashicons dashicons-chart-line"></span><p>Total space saved</p><strong><?php echo esc_html( size_format( $stats['saved'] ) ); ?></strong><small>Across optimized originals</small></article>
 				<article class="wpio-card"><span class="dashicons dashicons-images-alt2"></span><p>Images optimized</p><strong><?php echo esc_html( number_format_i18n( $stats['count'] ) ); ?></strong><small><?php echo esc_html( number_format_i18n( $stats['total'] ) ); ?> images in Media Library</small></article>
@@ -109,6 +116,29 @@ final class WP_Image_Optimize {
 		$result = $this->optimize_attachment( $id );
 		wp_safe_redirect( add_query_arg( 'wpio_notice', is_wp_error( $result ) ? 'error' : 'success', admin_url( 'upload.php' ) ) );
 		exit;
+	}
+
+	public function handle_bulk_optimization() {
+		check_ajax_referer( 'wpio_bulk_optimize', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => 'You are not allowed to optimize images.' ), 403 );
+		}
+		global $wpdb;
+		$last_id = isset( $_POST['last_id'] ) ? absint( $_POST['last_id'] ) : 0;
+		$id = (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND post_mime_type IN ('image/jpeg', 'image/png') AND ID > %d ORDER BY ID ASC LIMIT 1",
+			$last_id
+		) );
+		if ( ! $id ) {
+			wp_send_json_success( array( 'done' => true, 'last_id' => $last_id ) );
+		}
+		$result = $this->optimize_attachment( $id );
+		wp_send_json_success( array(
+			'done'    => false,
+			'last_id' => $id,
+			'name'    => get_the_title( $id ),
+			'error'   => is_wp_error( $result ) ? $result->get_error_message() : '',
+		) );
 	}
 
 	public function admin_notice() {
